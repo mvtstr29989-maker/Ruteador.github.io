@@ -29,7 +29,12 @@
   .dot{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;color:#fff;font-size:11px;font-weight:600;border:2px solid #fff;box-shadow:0 0 2px #000}
   #map{flex:1}
   .pin{width:22px;height:22px;border-radius:50%;color:#fff;font-size:10px;font-weight:600;display:flex;align-items:center;justify-content:center;border:2px solid #fff;box-shadow:0 0 3px rgba(0,0,0,.7)}
-  .pin.act{transform:scale(1.5);z-index:9999!important}
+  .pin{transition:transform .12s,box-shadow .12s;cursor:pointer}
+  .pin.act{transform:scale(1.5)}
+  .pin.hov{transform:scale(1.7);box-shadow:0 0 0 4px rgba(255,235,59,.9),0 0 10px 4px rgba(255,235,59,.8)}
+  .arrow{pointer-events:none}
+  .arrow svg{display:block;filter:drop-shadow(0 0 2px #000)}
+  tr.hov td{background:#fff8c4}
   @media(max-width:700px){#app{flex-direction:column-reverse}#side{width:100%;max-width:none;height:45%}}
 </style>
 </head>
@@ -65,7 +70,7 @@ L.control.layers({'Satélite':sat,'Calles':streets},{'Etiquetas':labels}).addTo(
 L.control.scale().addTo(map);
 
 const $=id=>document.getElementById(id);
-let data=[], layer=L.layerGroup().addTo(map), markers=[], rows=[], activeIdx=null;
+let data=[], layer=L.layerGroup().addTo(map), arrows=L.layerGroup(), markers=[], rows=[], activeIdx=null;
 
 function fmt(d){return d.toLocaleString('es-MX',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});}
 function num(v){return typeof v==='number'?v:parseFloat(String(v).replace(',','.'));}
@@ -101,7 +106,7 @@ function loadFile(f){
 }
 
 function render(fit){
-  layer.clearLayers();markers=[];rows=[];activeIdx=null;
+  layer.clearLayers();arrows.clearLayers();markers=[];rows=[];activeIdx=null;
   const sel=$('unit').value;
   const units=[...new Set(data.map(d=>d.unit))];
   const pts=data.filter(d=>!sel||d.unit===sel);
@@ -112,6 +117,15 @@ function render(fit){
     if(!g.length) return;
     const c=COLORS[units.indexOf(u)%COLORS.length];
     L.polyline(g.map(p=>[p.lat,p.lng]),{color:c,weight:3,opacity:.85}).addTo(layer);
+    for(let k=0;k<g.length-1;k++){
+      const a=g[k],b=g[k+1];
+      if(a.lat===b.lat&&a.lng===b.lng) continue;
+      const crs=map.options.crs,pa=crs.latLngToPoint([a.lat,a.lng],12),pb=crs.latLngToPoint([b.lat,b.lng],12);
+      const ang=Math.atan2(pb.y-pa.y,pb.x-pa.x)*180/Math.PI;
+      const mid=[(a.lat+b.lat)/2,(a.lng+b.lng)/2];
+      L.marker(mid,{interactive:false,icon:L.divIcon({className:'arrow',iconSize:[18,18],iconAnchor:[9,9],
+        html:`<svg width="18" height="18" viewBox="0 0 18 18" style="transform:rotate(${ang}deg)"><path d="M3 3 L15 9 L3 15 L6 9 Z" fill="#fff" stroke="${c}" stroke-width="1.5" stroke-linejoin="round"/></svg>`})}).addTo(arrows);
+    }
   });
   pts.forEach((p,i)=>{
     const c=COLORS[units.indexOf(p.unit)%COLORS.length];
@@ -119,17 +133,29 @@ function render(fit){
     const n=counters[p.unit];
     const m=L.marker([p.lat,p.lng],{icon:L.divIcon({className:'',html:`<div class="pin" style="background:${c}">${n}</div>`,iconSize:[22,22],iconAnchor:[11,11]})}).addTo(layer);
     m.bindPopup(`<b>Unidad ${p.unit}</b> — punto ${n}<br>${fmt(p.t)}<br>${p.lat.toFixed(6)}, ${p.lng.toFixed(6)}`);
+    m.bindTooltip(`#${n} · ${fmt(p.t)}${i===0||p.unit!==pts[i-1].unit?' (inicio)':''}${i===pts.length-1||p.unit!==pts[i+1].unit?' (fin)':''}`,{direction:'top',offset:[0,-12]});
     m.on('click',()=>select(i,false));
+    m.on('mouseover',()=>hover(i,true,true));
+    m.on('mouseout',()=>hover(i,false,true));
     markers.push(m);
     const tr=document.createElement('tr');
     tr.innerHTML=`<td><span class="dot" style="background:${c}">${n}</span></td><td>${p.unit}</td><td>${fmt(p.t)}</td>`;
     tr.onclick=()=>select(i,true);
+    tr.onmouseenter=()=>hover(i,true,false);
+    tr.onmouseleave=()=>hover(i,false,false);
     tb.appendChild(tr);rows.push(tr);
   });
   if(fit&&pts.length) map.fitBounds(pts.map(p=>[p.lat,p.lng]),{padding:[40,40]});
   window._pts=pts;
 }
 
+function hover(i,on,fromMap){
+  const el=markers[i]?.getElement()?.firstChild;
+  if(el) el.classList.toggle('hov',on);
+  rows[i]?.classList.toggle('hov',on);
+  if(on) markers[i].setZIndexOffset(10000); else markers[i].setZIndexOffset(0);
+  if(on&&fromMap) rows[i].scrollIntoView({block:'nearest'});
+}
 function select(i,fly){
   if(activeIdx!==null){rows[activeIdx].classList.remove('sel');markers[activeIdx].getElement()?.firstChild.classList.remove('act');}
   activeIdx=i;rows[i].classList.add('sel');
@@ -140,6 +166,9 @@ function select(i,fly){
   markers[i].getElement()?.firstChild.classList.add('act');
 }
 
+function updArrows(){ if(map.getZoom()>=14) map.addLayer(arrows); else map.removeLayer(arrows); }
+map.on('zoomend',updArrows);
+const _render=render; render=function(f){_render(f);updArrows();};
 $('drop').onclick=()=>$('file').click();
 $('file').onchange=e=>e.target.files[0]&&loadFile(e.target.files[0]);
 ['dragover','dragenter'].forEach(ev=>$('drop').addEventListener(ev,e=>{e.preventDefault();$('drop').classList.add('over');}));
