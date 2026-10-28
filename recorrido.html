@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Visor de recorridos</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0;font-family:system-ui,Segoe UI,Roboto,sans-serif;color:#202124}
+  #app{display:flex;height:100%}
+  #side{width:340px;max-width:45vw;display:flex;flex-direction:column;background:#fff;box-shadow:2px 0 8px rgba(0,0,0,.3);z-index:1000}
+  #head{padding:16px;border-bottom:1px solid #e0e0e0}
+  #head h1{font-size:18px;margin:0 0 4px;font-weight:500}
+  #head p{margin:0 0 12px;font-size:12px;color:#5f6368}
+  #drop{border:2px dashed #1a73e8;border-radius:8px;padding:14px;text-align:center;cursor:pointer;color:#1a73e8;font-size:14px}
+  #drop.over{background:#e8f0fe}
+  #file{display:none}
+  #info{font-size:12px;color:#5f6368;margin-top:8px;min-height:16px}
+  #err{color:#d93025;font-size:12px;margin-top:6px}
+  #tools{display:flex;gap:8px;padding:8px 16px;border-bottom:1px solid #e0e0e0;align-items:center;font-size:13px}
+  #tools select,#tools button{font:inherit;padding:4px 8px;border:1px solid #dadce0;border-radius:4px;background:#fff;cursor:pointer}
+  #list{flex:1;overflow:auto}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{position:sticky;top:0;background:#f1f3f4;text-align:left;padding:6px 8px;font-weight:500}
+  td{padding:6px 8px;border-bottom:1px solid #f1f3f4;cursor:pointer;white-space:nowrap}
+  tr:hover td{background:#e8f0fe}
+  tr.sel td{background:#d2e3fc}
+  .dot{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;color:#fff;font-size:11px;font-weight:600;border:2px solid #fff;box-shadow:0 0 2px #000}
+  #map{flex:1}
+  .pin{width:22px;height:22px;border-radius:50%;color:#fff;font-size:10px;font-weight:600;display:flex;align-items:center;justify-content:center;border:2px solid #fff;box-shadow:0 0 3px rgba(0,0,0,.7)}
+  .pin.act{transform:scale(1.5);z-index:9999!important}
+  @media(max-width:700px){#app{flex-direction:column-reverse}#side{width:100%;max-width:none;height:45%}}
+</style>
+</head>
+<body>
+<div id="app">
+  <aside id="side">
+    <div id="head">
+      <h1>Visor de recorridos</h1>
+      <p>Excel con columnas: Unidad, FechaHora, Latitud, Longitud</p>
+      <div id="drop">📂 Cargar Excel (clic o arrastrar)</div>
+      <input type="file" id="file" accept=".xlsx,.xls,.csv">
+      <div id="info"></div><div id="err"></div>
+    </div>
+    <div id="tools">
+      <label for="unit">Unidad:</label>
+      <select id="unit"></select>
+      <button id="fit">Ver todo</button>
+    </div>
+    <div id="list"><table><thead><tr><th>#</th><th>Unidad</th><th>Fecha y hora</th></tr></thead><tbody id="tb"></tbody></table></div>
+  </aside>
+  <div id="map"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script>
+const COLORS=['#1a73e8','#e8710a','#188038','#d93025','#9334e6','#00897b','#c2185b','#5f6368'];
+const sat=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,attribution:'Esri World Imagery'});
+const labels=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',{maxZoom:19});
+const streets=L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'});
+const map=L.map('map',{layers:[sat,labels]}).setView([19.7,-99.18],11);
+L.control.layers({'Satélite':sat,'Calles':streets},{'Etiquetas':labels}).addTo(map);
+L.control.scale().addTo(map);
+
+const $=id=>document.getElementById(id);
+let data=[], layer=L.layerGroup().addTo(map), markers=[], rows=[], activeIdx=null;
+
+function fmt(d){return d.toLocaleString('es-MX',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});}
+function num(v){return typeof v==='number'?v:parseFloat(String(v).replace(',','.'));}
+function toDate(v){
+  if(v instanceof Date) return v;
+  if(typeof v==='number'){const o=XLSX.SSF.parse_date_code(v);return o?new Date(o.y,o.m-1,o.d,o.H,o.M,Math.floor(o.S)):null;}
+  const d=new Date(v);return isNaN(d)?null:d;
+}
+function pick(r,name){const k=Object.keys(r).find(k=>k.trim().toLowerCase().replace(/\s/g,'')===name);return k?r[k]:undefined;}
+
+function loadFile(f){
+  $('err').textContent='';
+  const rd=new FileReader();
+  rd.onload=e=>{
+    try{
+      const wb=XLSX.read(e.target.result,{type:'array',cellDates:true});
+      const json=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{raw:true});
+      const out=[];
+      json.forEach(r=>{
+        const lat=num(pick(r,'latitud')),lng=num(pick(r,'longitud')),t=toDate(pick(r,'fechahora'));
+        if(isFinite(lat)&&isFinite(lng)&&t) out.push({unit:String(pick(r,'unidad')??'—'),t,lat,lng});
+      });
+      if(!out.length) throw new Error('No se encontraron filas válidas. Revisa los encabezados: Unidad, FechaHora, Latitud, Longitud.');
+      out.sort((a,b)=>a.t-b.t);
+      data=out;
+      const units=[...new Set(data.map(d=>d.unit))];
+      $('unit').innerHTML='<option value="">Todas</option>'+units.map(u=>`<option>${u}</option>`).join('');
+      $('info').textContent=`${f.name}: ${data.length} posiciones, ${units.length} unidad(es)`;
+      render(true);
+    }catch(ex){$('err').textContent=ex.message;}
+  };
+  rd.readAsArrayBuffer(f);
+}
+
+function render(fit){
+  layer.clearLayers();markers=[];rows=[];activeIdx=null;
+  const sel=$('unit').value;
+  const units=[...new Set(data.map(d=>d.unit))];
+  const pts=data.filter(d=>!sel||d.unit===sel);
+  const tb=$('tb');tb.innerHTML='';
+  const counters={};
+  units.forEach(u=>{
+    const g=pts.filter(p=>p.unit===u);
+    if(!g.length) return;
+    const c=COLORS[units.indexOf(u)%COLORS.length];
+    L.polyline(g.map(p=>[p.lat,p.lng]),{color:c,weight:3,opacity:.85}).addTo(layer);
+  });
+  pts.forEach((p,i)=>{
+    const c=COLORS[units.indexOf(p.unit)%COLORS.length];
+    counters[p.unit]=(counters[p.unit]||0)+1;
+    const n=counters[p.unit];
+    const m=L.marker([p.lat,p.lng],{icon:L.divIcon({className:'',html:`<div class="pin" style="background:${c}">${n}</div>`,iconSize:[22,22],iconAnchor:[11,11]})}).addTo(layer);
+    m.bindPopup(`<b>Unidad ${p.unit}</b> — punto ${n}<br>${fmt(p.t)}<br>${p.lat.toFixed(6)}, ${p.lng.toFixed(6)}`);
+    m.on('click',()=>select(i,false));
+    markers.push(m);
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td><span class="dot" style="background:${c}">${n}</span></td><td>${p.unit}</td><td>${fmt(p.t)}</td>`;
+    tr.onclick=()=>select(i,true);
+    tb.appendChild(tr);rows.push(tr);
+  });
+  if(fit&&pts.length) map.fitBounds(pts.map(p=>[p.lat,p.lng]),{padding:[40,40]});
+  window._pts=pts;
+}
+
+function select(i,fly){
+  if(activeIdx!==null){rows[activeIdx].classList.remove('sel');markers[activeIdx].getElement()?.firstChild.classList.remove('act');}
+  activeIdx=i;rows[i].classList.add('sel');
+  if(!fly) rows[i].scrollIntoView({block:'nearest'});
+  const p=window._pts[i];
+  if(fly) map.flyTo([p.lat,p.lng],Math.max(map.getZoom(),17),{duration:.8});
+  markers[i].openPopup();
+  markers[i].getElement()?.firstChild.classList.add('act');
+}
+
+$('drop').onclick=()=>$('file').click();
+$('file').onchange=e=>e.target.files[0]&&loadFile(e.target.files[0]);
+['dragover','dragenter'].forEach(ev=>$('drop').addEventListener(ev,e=>{e.preventDefault();$('drop').classList.add('over');}));
+['dragleave','drop'].forEach(ev=>$('drop').addEventListener(ev,e=>{e.preventDefault();$('drop').classList.remove('over');}));
+$('drop').addEventListener('drop',e=>e.dataTransfer.files[0]&&loadFile(e.dataTransfer.files[0]));
+$('unit').onchange=()=>render(true);
+$('fit').onclick=()=>window._pts?.length&&map.fitBounds(window._pts.map(p=>[p.lat,p.lng]),{padding:[40,40]});
+</script>
+</body>
+</html>
